@@ -114,7 +114,7 @@ static int dot_stuff(const char *in, int inlen, char *out, int outmax)
 static char *read_file(const char *path, int *outlen)
 {
     if (!path) { puts("  [FILE] null path\n");  return NULL; }
-    HANDLE h = CreateFile((char*)path, 0, 0, NULL);
+    HANDLE h = CreateFile((char*)path, FILE_ACCESS_READ, 0, NULL);
     if (!h) { puts("  [FILE] CreateFile fail\n"); return NULL; }
 
     DWORD sz = GetFileSize(h, NULL);
@@ -412,7 +412,7 @@ static int load_config(const char *path, SendmailConfig *cfg)
     memset(cfg, 0, sizeof(*cfg));
     cfg->port = 25; /* default */
 
-    HANDLE h = CreateFile((char*)path, 0, 0, NULL);
+    HANDLE h = CreateFile((char*)path, FILE_ACCESS_READ, 0, NULL);
     if (!h) return 0;
 
     DWORD sz = GetFileSize(h, NULL);
