@@ -32,8 +32,8 @@ extern int HxIOSend(WOLFSSL* ssl, char* buf, int sz, void* ctx);
 /* ---------- Constants ---------- */
 #define MAX_RESP      4096
 #define MAX_ATTACH     8
-#define MAX_ATT_SIZE  (512 * 102L)
-#define MAX_BODY_SIZE (512 * 102L)
+#define MAX_ATT_SIZE  (512 * 1024L)
+#define MAX_BODY_SIZE (512 * 1024L)
 #define BOUNDARY_STR  "----=_HelloX_Sendmail_0001"
 
 #ifndef NULL
