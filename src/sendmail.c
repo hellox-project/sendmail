@@ -365,11 +365,17 @@ static void usage(void)
  * =================================================================== */
 #define CFG_LINE_MAX 512
 
-/* Trim trailing \r\n */
+/* Trim trailing whitespace including \r\n, and remove carriage returns */
 static void chomp(char *s) {
     int len = (int)strlen(s);
     while (len > 0 && (s[len-1] == '\r' || s[len-1] == '\n' || s[len-1] == ' ' || s[len-1] == '\t'))
         s[--len] = 0;
+    /* Remove any stray \r in the middle (e.g. from split lines) */
+    int di = 0;
+    for (int si = 0; si < len; si++) {
+        if (s[si] != '\r') s[di++] = s[si];
+    }
+    s[di] = 0;
 }
 
 /* Read first token from a line after '=' , returns pointer or NULL */
@@ -459,22 +465,41 @@ static int load_config(const char *path, SendmailConfig *cfg)
     return 1;
 }
 
-/* Helper: malloc + read a file into a heap buffer (fallback path that builds absolute path) */
+/* Check if a path looks absolute (has a drive letter like c:\\ or c:/) */
+static int is_absolute_path(const char *p) {
+    if (!p || !*p) return 0;
+    if ((p[0] >= 'a' && p[0] <= 'z') || (p[0] >= 'A' && p[0] <= 'Z')) {
+        if (p[1] == ':') return 1;
+    }
+    if (p[0] == '/' || p[0] == '\\') return 1;
+    return 0;
+}
+
+/* Helper: read a file, trying the given path first, then prepending dir.
+ * Only prepends dir if the path is relative (no drive letter prefix).
+ * Returns NULL only if all attempts fail.
+ */
 static char *read_file_at(const char *dir, const char *fname, int *outlen)
 {
-    /* Try direct path first */
+    /* Try the path as-is first */
     char *d = read_file(fname, outlen);
     if (d) return d;
-    /* Try prepending dir */
-    char full[512];
-    int di = 0;
-    const char *dp = dir;
-    while (*dp && di < 500) full[di++] = *dp++;
-    if (di > 0 && full[di-1] != '\\' && full[di-1] != '/') full[di++] = '\\';
-    dp = fname;
-    while (*dp && di < 508) full[di++] = *dp++;
-    full[di] = 0;
-    return read_file(full, outlen);
+    puts("  [FILE] \""); puts(fname); puts("\" not found\n");
+    /* If the path is relative, try prepending dir */
+    if (!is_absolute_path(fname) && dir && dir[0]) {
+        char full[512];
+        int di = 0;
+        const char *dp = dir;
+        while (*dp && di < 500) full[di++] = *dp++;
+        /* ensure backslash separator */
+        if (di > 0 && full[di-1] != '\\' && full[di-1] != '/') full[di++] = '\\';
+        dp = fname;
+        while (*dp && di < 508) full[di++] = *dp++;
+        full[di] = 0;
+        puts("  [FILE] trying: \""); puts(full); puts("\"\n");
+        return read_file(full, outlen);
+    }
+    return NULL;
 }
 
 /* ===================================================================
@@ -589,11 +614,11 @@ int main(int argc, char *argv[])
         /* body_file already set above */
     }
 
-    /* ---- Read Body File ---- */
+    /* ---- Read Body File (with config-dir fallback) ---- */
     char *body_data = NULL;
     int   body_len  = 0;
     if (body_file) {
-        body_data = read_file(body_file, &body_len);
+        body_data = read_file_at(cfg_dir, body_file, &body_len);
         if (body_data) {
             puts("  BODY READ: "); putint(body_len); puts(" bytes\n");
         } else {
@@ -611,7 +636,7 @@ int main(int argc, char *argv[])
     int att_cnt = 0;
 
     for (int i = 0; i < num_att; i++) {
-        atts[att_cnt].data = (unsigned char*)read_file(att_paths[i], &atts[att_cnt].len);
+        atts[att_cnt].data = (unsigned char*)read_file_at(cfg_dir, att_paths[i], &atts[att_cnt].len);
         if (!atts[att_cnt].data) continue;
 
         /* Extract filename from path */
