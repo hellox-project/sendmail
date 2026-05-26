@@ -113,12 +113,15 @@ static int dot_stuff(const char *in, int inlen, char *out, int outmax)
  * =================================================================== */
 static char *read_file(const char *path, int *outlen)
 {
-    if (!path) return NULL;
+    if (!path) { puts("  [FILE] null path\n");  return NULL; }
     HANDLE h = CreateFile((char*)path, 0, 0, NULL);
-    if (!h) return NULL;
+    if (!h) { puts("  [FILE] CreateFile fail\n"); return NULL; }
 
     DWORD sz = GetFileSize(h, NULL);
-    if (sz <= 0 || sz > MAX_ATT_SIZE) {
+    if (sz <= 0) { puts("  [FILE] size <= 0\n"); CloseFile(h); return NULL; }
+    if (sz > MAX_ATT_SIZE) {
+        puts("  [FILE] too large: "); putint((int)sz);
+        puts(" > "); putint((int)MAX_ATT_SIZE); putc('\n');
         CloseFile(h);
         return NULL;
     }
@@ -475,30 +478,86 @@ static int is_absolute_path(const char *p) {
     return 0;
 }
 
-/* Helper: read a file, trying the given path first, then prepending dir.
- * Only prepends dir if the path is relative (no drive letter prefix).
+/* Helper: read a file, trying multiple path formats.
+ * 1. Path as-is
+ * 2. If absolute (has drive letter like C:\...), also try without the drive letter (e.g. \FTP\FILE.TXT)
+ * 3. If relative path, try prepending dir
+ * 4. Also try forward-slash versions of all of the above
  * Returns NULL only if all attempts fail.
  */
 static char *read_file_at(const char *dir, const char *fname, int *outlen)
 {
-    /* Try the path as-is first */
-    char *d = read_file(fname, outlen);
-    if (d) return d;
-    puts("  [FILE] \""); puts(fname); puts("\" not found\n");
-    /* If the path is relative, try prepending dir */
-    if (!is_absolute_path(fname) && dir && dir[0]) {
-        char full[512];
+    char alt[512];
+    int tried;
+    
+    if (!fname) return NULL;
+
+    /* 1. Try the path as-is first */
+    {
+        char *d = read_file(fname, outlen);
+        if (d) return d;
+        puts("  [FILE] \""); puts(fname); puts("\" not found\n");
+    }
+
+    /* 2. If path has a drive letter (C:\...), try stripping the drive letter (\FTP\FILE.TXT) */
+    if ((fname[0] >= 'a' && fname[0] <= 'z') || (fname[0] >= 'A' && fname[0] <= 'Z')) {
+        if (fname[1] == ':') {
+            /* Skip "C:" part */
+            tried = 0;
+            const char *src = fname + 2;
+            int di = 0;
+            while (*src && di < 508) alt[di++] = *src++;
+            alt[di] = 0;
+            puts("  [FILE] trying (no drive): \""); puts(alt); puts("\"\n");
+            char *d = read_file(alt, outlen);
+            if (d) return d;
+        }
+    }
+
+    /* 3. Try forward-slash conversion of the original path */
+    {
+        int di = 0;
+        const char *src = fname;
+        while (*src && di < 508) {
+            alt[di++] = (*src == '\\') ? '/' : *src;
+            src++;
+        }
+        alt[di] = 0;
+        /* Only try if different from original */
+        if (strcmp(alt, fname) != 0) {
+            puts("  [FILE] trying (fwd slash): \""); puts(alt); puts("\"\n");
+            char *d = read_file(alt, outlen);
+            if (d) return d;
+        }
+    }
+
+    /* 4. Try with cfg_dir prepended (for relative paths from config) */
+    if (dir && dir[0]) {
         int di = 0;
         const char *dp = dir;
-        while (*dp && di < 500) full[di++] = *dp++;
-        /* ensure backslash separator */
-        if (di > 0 && full[di-1] != '\\' && full[di-1] != '/') full[di++] = '\\';
+        while (*dp && di < 500) alt[di++] = *dp++;
+        if (di > 0 && alt[di-1] != '\\' && alt[di-1] != '/') alt[di++] = '\\';
         dp = fname;
-        while (*dp && di < 508) full[di++] = *dp++;
-        full[di] = 0;
-        puts("  [FILE] trying: \""); puts(full); puts("\"\n");
-        return read_file(full, outlen);
+        while (*dp && di < 508) alt[di++] = *dp++;
+        alt[di] = 0;
+        puts("  [FILE] trying (with dir): \""); puts(alt); puts("\"\n");
+        char *d = read_file(alt, outlen);
+        if (d) return d;
+
+        /* 5. Also try forward-slash of dir+... */
+        {
+            int ci = 0;
+            while (ci < di) {
+                if (alt[ci] == '\\') alt[ci] = '/';
+                ci++;
+            }
+            puts("  [FILE] trying (with dir, fwd slash): \""); puts(alt); puts("\"\n");
+            d = read_file(alt, outlen);
+            if (d) return d;
+        }
     }
+
+    puts("  [FILE] ALL attempts failed for \""); puts(fname); puts("\"\n");
     return NULL;
 }
 
