@@ -2,9 +2,36 @@
 set -e
 cd "$(dirname "$0")"
 SRC_DIR="$(pwd)"
-SYSBRAIN="$HOME/hellox/v190/ishell/sysbrain0.0.3"
+
+# Find sysbrain directory - try multiple locations
+SYSBRAIN=""
+for candidate in \
+    "$HOME/hellox/v190/ishell/sysbrain0.0.3" \
+    "$HOME/hellox/v190/sysbrain0.0.3" \
+    "$HOME/hellox/archive/sysbrain0.0.3" \
+    "$HOME/hellox/archive/hxosv190/app/sysbrain0.0.3" \
+    "$SRC_DIR/../ishell/sysbrain0.0.3" \
+    "$SRC_DIR/../sysbrain0.0.3"; do
+    if [ -f "$candidate/main.o" ]; then
+        SYSBRAIN="$candidate"
+        break
+    fi
+done
+
+if [ -z "$SYSBRAIN" ]; then
+    echo "ERROR: sysbrain0.0.3 not found! Tried:" >&2
+    for candidate in \
+        "$HOME/hellox/v190/ishell/sysbrain0.0.3" \
+        "$HOME/hellox/v190/sysbrain0.0.3"; do
+        echo "  $candidate" >&2
+    done
+    echo ""
+    echo "Please set SYSBRAIN_DIR env var to your sysbrain0.0.3 path and retry." >&2
+    exit 1
+fi
 
 echo "=== Build Sendmail ==="
+echo "SYSBRAIN: $SYSBRAIN"
 
 CFLAGS="-m32 -ffreestanding -nostdlib -nostdinc -fno-builtin -fno-stack-protector"
 CFLAGS="$CFLAGS -fno-pic -fno-PIE -fno-pie"
@@ -51,3 +78,9 @@ echo ""
 echo "=== BUILD OK ==="
 ls -lh sendmail.exe
 file sendmail.exe
+# Verify entry point is valid
+ENTRY=$(objdump -x sendmail.exe 2>/dev/null | grep AddressOfEntryPoint | awk '{print $2}')
+if [ "$ENTRY" = "00000000" ]; then
+    echo "WARNING: Entry point is 0x00000000! Linker may have failed to find _hx_main."
+    echo "Check that main.o is in the SYSBRAIN directory."
+fi
