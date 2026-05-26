@@ -540,23 +540,23 @@ int main(int argc, char *argv[])
     }
 
     /* Try to load config file 'sendmail.cfg' from same directory as executable */
-    char cfg_path[512];
+    char cfg_path[256];
     int cfg_loaded = 0;
     if (cfg_dir[0]) {
-        /* Build full path: cfg_dir\\sendmail.cfg */
         int wi = 0;
         const char *dp = cfg_dir;
-        while (*dp && wi < 500) cfg_path[wi++] = *dp++;
+        while (*dp && wi < 244) cfg_path[wi++] = *dp++;
         cfg_path[wi++] = '\\';
         const char *cfgn = "sendmail.cfg";
-        while (*cfgn && wi < 508) cfg_path[wi++] = *cfgn++;
+        while (*cfgn && wi < 252) cfg_path[wi++] = *cfgn++;
         cfg_path[wi] = 0;
     } else {
         strncpy(cfg_path, "sendmail.cfg", sizeof(cfg_path)-1);
     }
 
-    SendmailConfig cfg_buf;
-    cfg_loaded = load_config(cfg_path, &cfg_buf);
+    SendmailConfig *cfg_buf = (SendmailConfig*)malloc(sizeof(SendmailConfig));
+    if (!cfg_buf) { puts("[MALLOC FAIL]\n"); goto cleanup; }
+    cfg_loaded = load_config(cfg_path, cfg_buf);
 
     /* ---- Parse Arguments (override config if present) ---- */
     if (argc > 1 && argv[1][0] == '?' && argv[1][1] == 0) {
@@ -581,15 +581,15 @@ int main(int argc, char *argv[])
         if (argc > 8 && argv[8][0] != '.') subject = argv[8];
     } else if (cfg_loaded) {
         /* No CLI args — use config file */
-        server   = cfg_buf.server;
-        port     = cfg_buf.port;
-        username = cfg_buf.username;
-        password = cfg_buf.password;
-        from     = cfg_buf.from;
-        to_all   = cfg_buf.to;
-        if (cfg_buf.cc[0]) cc_all = cfg_buf.cc;
-        subject  = cfg_buf.subject;
-        if (cfg_buf.body_file[0]) body_file = cfg_buf.body_file;
+        server   = cfg_buf->server;
+        port     = cfg_buf->port;
+        username = cfg_buf->username;
+        password = cfg_buf->password;
+        from     = cfg_buf->from;
+        to_all   = cfg_buf->to;
+        if (cfg_buf->cc[0]) cc_all = cfg_buf->cc;
+        subject  = cfg_buf->subject;
+        if (cfg_buf->body_file[0]) body_file = cfg_buf->body_file;
     }
     /* else: use defaults */
 
@@ -608,8 +608,8 @@ int main(int argc, char *argv[])
         }
     } else if (cfg_loaded) {
         /* Config file: use attachment paths from config */
-        for (int i = 0; i < cfg_buf.num_att && i < MAX_ATTACH; i++) {
-            att_paths[num_att++] = cfg_buf.attachments[i];
+        for (int i = 0; i < cfg_buf->num_att && i < MAX_ATTACH; i++) {
+            att_paths[num_att++] = cfg_buf->attachments[i];
         }
         /* body_file already set above */
     }
@@ -651,19 +651,21 @@ int main(int argc, char *argv[])
         att_cnt++;
     }
 
+    char *resp = NULL;
     puts("Attachments: "); putint(att_cnt); putc('\n');
 
     /* ---- TCP Connect ---- */
-    char resp[MAX_RESP];
+    resp = (char*)malloc(MAX_RESP);
+    if (!resp) { puts("  [MALLOC FAIL]\n"); goto cleanup; }
     puts("[CONNECT] "); puts(server); putc(':'); putint(port); puts("...\n");
     int fd = tcp_connect(server, port);
     if (fd < 0) { puts("  [FAIL] err="); putint(fd); putc('\n'); goto cleanup; }
     puts("  [OK] fd="); putint(fd); putc('\n');
 
     /* ---- Phase 1: Plain SMTP ---- */
-    if (smtp_cmd_plain(fd, NULL, 220, resp, sizeof(resp))) goto closefd;
-    if (smtp_cmd_plain(fd, "EHLO HelloX-OS", 250, resp, sizeof(resp))) goto closefd;
-    if (smtp_cmd_plain(fd, "STARTTLS", 220, resp, sizeof(resp))) {
+    if (smtp_cmd_plain(fd, NULL, 220, resp, MAX_RESP)) goto closefd;
+    if (smtp_cmd_plain(fd, "EHLO HelloX-OS", 250, resp, MAX_RESP)) goto closefd;
+    if (smtp_cmd_plain(fd, "STARTTLS", 220, resp, MAX_RESP)) {
         puts("[NO STARTTLS]\n"); goto closefd;
     }
 
@@ -691,8 +693,8 @@ int main(int argc, char *argv[])
     puts("  [TLS OK] "); puts(wolfSSL_get_cipher(ssl)); putc('\n');
 
     /* ---- Phase 3: SMTP over TLS ---- */
-    if (smtp_cmd_tls(ssl, "EHLO HelloX-OS", 250, resp, sizeof(resp))) goto free_ssl;
-    if (smtp_cmd_tls(ssl, "AUTH LOGIN", 334, resp, sizeof(resp))) goto free_ssl;
+    if (smtp_cmd_tls(ssl, "EHLO HelloX-OS", 250, resp, MAX_RESP)) goto free_ssl;
+    if (smtp_cmd_tls(ssl, "AUTH LOGIN", 334, resp, MAX_RESP)) goto free_ssl;
 
     /* AUTH LOGIN - send base64 username and password */
     {
@@ -700,11 +702,11 @@ int main(int argc, char *argv[])
         int n;
         n = b64enc((const unsigned char*)username, (int)strlen(username), b64buf);
         b64buf[n] = 0;
-        if (smtp_cmd_tls(ssl, b64buf, 334, resp, sizeof(resp))) goto free_ssl;
+        if (smtp_cmd_tls(ssl, b64buf, 334, resp, MAX_RESP)) goto free_ssl;
 
         n = b64enc((const unsigned char*)password, (int)strlen(password), b64buf);
         b64buf[n] = 0;
-        if (smtp_cmd_tls(ssl, b64buf, 235, resp, sizeof(resp))) {
+        if (smtp_cmd_tls(ssl, b64buf, 235, resp, MAX_RESP)) {
             puts("  [AUTH FAIL]\n"); goto free_ssl;
         }
     }
@@ -713,12 +715,13 @@ int main(int argc, char *argv[])
     {
         char cmd[300];
         sprintf(cmd, "MAIL FROM:<%s>", from);
-        if (smtp_cmd_tls(ssl, cmd, 250, resp, sizeof(resp))) goto free_ssl;
+        if (smtp_cmd_tls(ssl, cmd, 250, resp, MAX_RESP)) goto free_ssl;
     }
 
     /* ---- RCPT TO (support comma-separated recipients) ---- */
     {
-        char copy[2048];
+        char *copy = (char*)malloc(2048);
+        if (!copy) goto free_ssl;
         int ci = 0;
         const char *tp = to_all;
         while (*tp && ci < 2044) copy[ci++] = *tp++;
@@ -732,16 +735,18 @@ int main(int argc, char *argv[])
             if (*tok) {
                 char cmd[300];
                 sprintf(cmd, "RCPT TO:<%s>", tok);
-                smtp_cmd_tls(ssl, cmd, 250, resp, sizeof(resp));
+                smtp_cmd_tls(ssl, cmd, 250, resp, MAX_RESP);
             }
             if (!comma) break;
             tok = comma + 1;
         }
+        free(copy);
     }
 
     /* ---- CC Recipients ---- */
     if (cc_all) {
-        char copy[2048];
+        char *copy = (char*)malloc(2048);
+        if (!copy) goto free_ssl;
         int ci = 0;
         const char *cp = cc_all;
         while (*cp && ci < 2044) copy[ci++] = *cp++;
@@ -755,7 +760,7 @@ int main(int argc, char *argv[])
             if (*tok) {
                 char cmd[300];
                 sprintf(cmd, "RCPT TO:<%s>", tok);
-                smtp_cmd_tls(ssl, cmd, 250, resp, sizeof(resp));
+                smtp_cmd_tls(ssl, cmd, 250, resp, MAX_RESP);
             }
             if (!comma) break;
             tok = comma + 1;
@@ -763,7 +768,7 @@ int main(int argc, char *argv[])
     }
 
     /* ---- DATA ---- */
-    if (smtp_cmd_tls(ssl, "DATA", 354, resp, sizeof(resp))) goto free_ssl;
+    if (smtp_cmd_tls(ssl, "DATA", 354, resp, MAX_RESP)) goto free_ssl;
 
     /* =============================================================
      * Build MIME payload
@@ -877,7 +882,7 @@ int main(int argc, char *argv[])
     free(payload);
 
     /* Check response */
-    recvline_tls(ssl, resp, sizeof(resp));
+    recvline_tls(ssl, resp, MAX_RESP);
     puts("S: "); puts(resp); putc('\n');
     if (resp_code(resp) == 250) {
         puts("[EMAIL SENT SUCCESSFULLY]\n");
@@ -886,7 +891,7 @@ int main(int argc, char *argv[])
     }
 
     /* QUIT */
-    smtp_cmd_tls(ssl, "QUIT", 221, resp, sizeof(resp));
+    smtp_cmd_tls(ssl, "QUIT", 221, resp, MAX_RESP);
 
 free_ssl:
     if (ssl) wolfSSL_free(ssl);
@@ -896,6 +901,8 @@ closefd:
     if (fd >= 0) lwip_close(fd);
 cleanup:
     if (wolfSSL_inited) wolfSSL_Cleanup();
+    free(resp);
+    free(cfg_buf);
     free(body_data);
     for (int i = 0; i < att_cnt; i++) free(atts[i].data);
     puts("[SENDMAIL] Done\n");
