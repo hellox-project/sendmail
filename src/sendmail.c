@@ -325,6 +325,8 @@ static void usage(void)
     puts("         [password] [from] [to] [cc] [subject]\r\n");
     puts("         [-b bodyfile] [attachment ...]\r\n");
     puts("\r\n");
+    puts("  (No args = reads sendmail.cfg from same directory)\r\n");
+    puts("\r\n");
     puts("Positional (use '.' to skip):\r\n");
     puts("  1 server   IP address of SMTP server\r\n");
     puts("  2 port     TCP port (default 25)\r\n");
@@ -339,9 +341,140 @@ static void usage(void)
     puts("  -b <file>  Body text from file\r\n");
     puts("  <file>..   Attachments (max 8, max 512KB each)\r\n");
     puts("\r\n");
+    puts("Config file (sendmail.cfg) format:\r\n");
+    puts("  server=smtp.163.com (or IP)\r\n");
+    puts("  port=25\r\n");
+    puts("  username=xxx@163.com\r\n");
+    puts("  password=xxx\r\n");
+    puts("  from=xxx@163.com\r\n");
+    puts("  to=recipient1@x,recipient2@y\r\n");
+    puts("  cc=cc@example.com\r\n");
+    puts("  subject=Test\r\n");
+    puts("  body=c:\\body.txt\r\n");
+    puts("  attach=c:\\file1.bin\r\n");
+    puts("  attach=c:\\file2.bin\r\n");
+    puts("  (lines starting with # are comments)\r\n");
+    puts("\r\n");
     puts("Example:\r\n");
     puts("  loadapp c:\\\\sendmail.exe . . . . . \"a@b,c@d\" \"e@f\" \"Test\"\r\n");
     puts("====================================================\r\n");
+}
+
+/* ===================================================================
+ * Config file parsing (fallback when no CLI args available)
+ * =================================================================== */
+#define CFG_LINE_MAX 512
+
+/* Trim trailing \r\n */
+static void chomp(char *s) {
+    int len = (int)strlen(s);
+    while (len > 0 && (s[len-1] == '\r' || s[len-1] == '\n' || s[len-1] == ' ' || s[len-1] == '\t'))
+        s[--len] = 0;
+}
+
+/* Read first token from a line after '=' , returns pointer or NULL */
+static const char *cfg_val(char *line) {
+    char *eq = strchr(line, '=');
+    if (!eq) return NULL;
+    /* skip past = and whitespace */
+    char *v = eq + 1;
+    while (*v == ' ' || *v == '\t') v++;
+    return v;
+}
+
+/* Load config from path, storing string values into provided buffers */
+typedef struct {
+    char server[64];
+    int  port;
+    char username[128];
+    char password[128];
+    char from[128];
+    char to[512];
+    char cc[256];
+    char subject[256];
+    char body_file[256];
+    char attachments[8][256];
+    int  num_att;
+    int  found; /* non-zero if config was read OK */
+} SendmailConfig;
+
+static int load_config(const char *path, SendmailConfig *cfg)
+{
+    memset(cfg, 0, sizeof(*cfg));
+    cfg->port = 25; /* default */
+
+    HANDLE h = CreateFile((char*)path, 0, 0, NULL);
+    if (!h) return 0;
+
+    DWORD sz = GetFileSize(h, NULL);
+    if (sz <= 0 || sz > 16384) { CloseFile(h); return 0; }
+
+    char *buf = (char*)malloc((size_t)(sz + 4));
+    if (!buf) { CloseFile(h); return 0; }
+
+    DWORD read = 0;
+    ReadFile(h, sz, buf, &read);
+    CloseFile(h);
+    buf[(int)read] = 0;
+
+    /* Parse line by line */
+    char line[CFG_LINE_MAX];
+    int li = 0, bi = 0;
+    while (bi < (int)read && buf[bi]) {
+        int pi = 0;
+        while (bi < (int)read && buf[bi] && buf[bi] != '\n' && pi < CFG_LINE_MAX - 1)
+            line[pi++] = buf[bi++];
+        if (buf[bi] == '\n') bi++;
+        line[pi] = 0;
+        chomp(line);
+
+        /* Skip empty lines and comments */
+        if (line[0] == 0 || line[0] == '#') continue;
+
+        const char *val;
+        if ((val = cfg_val(line))) {
+            if      (strncmp(line, "server", 6) == 0)  { strncpy(cfg->server, val, sizeof(cfg->server)-1); }
+            else if (strncmp(line, "port", 4) == 0)     { cfg->port = 0; while (*val >= '0' && *val <= '9') cfg->port = cfg->port * 10 + (*val++ - '0'); }
+            else if (strncmp(line, "username", 8) == 0) { strncpy(cfg->username, val, sizeof(cfg->username)-1); }
+            else if (strncmp(line, "password", 8) == 0) { strncpy(cfg->password, val, sizeof(cfg->password)-1); }
+            else if (strncmp(line, "from", 4) == 0)     { strncpy(cfg->from, val, sizeof(cfg->from)-1); }
+            else if (strncmp(line, "to", 2) == 0)       { strncpy(cfg->to, val, sizeof(cfg->to)-1); }
+            else if (strncmp(line, "cc", 2) == 0)       { strncpy(cfg->cc, val, sizeof(cfg->cc)-1); }
+            else if (strncmp(line, "subject", 7) == 0)  { strncpy(cfg->subject, val, sizeof(cfg->subject)-1); }
+            else if (strncmp(line, "body", 4) == 0)     { strncpy(cfg->body_file, val, sizeof(cfg->body_file)-1); }
+            else if (strncmp(line, "attach", 6) == 0) {
+                if (cfg->num_att < 8) {
+                    strncpy(cfg->attachments[cfg->num_att], val, sizeof(cfg->attachments[0])-1);
+                    cfg->num_att++;
+                }
+            }
+        }
+    }
+
+    free(buf);
+    cfg->found = 1;
+
+    puts("  Config loaded: "); puts(path); putc('\n');
+    putint(cfg->num_att); puts(" attachment(s)\n");
+    return 1;
+}
+
+/* Helper: malloc + read a file into a heap buffer (fallback path that builds absolute path) */
+static char *read_file_at(const char *dir, const char *fname, int *outlen)
+{
+    /* Try direct path first */
+    char *d = read_file(fname, outlen);
+    if (d) return d;
+    /* Try prepending dir */
+    char full[512];
+    int di = 0;
+    const char *dp = dir;
+    while (*dp && di < 500) full[di++] = *dp++;
+    if (di > 0 && full[di-1] != '\\' && full[di-1] != '/') full[di++] = '\\';
+    dp = fname;
+    while (*dp && di < 508) full[di++] = *dp++;
+    full[di] = 0;
+    return read_file(full, outlen);
 }
 
 /* ===================================================================
@@ -362,33 +495,98 @@ int main(int argc, char *argv[])
     const char *subject  = "AI News from HelloX OS (TLS)";
     const char *body_file = NULL;
 
-    /* ---- Parse Arguments ---- */
+    /* Detect config directory from argv[0] if possible */
+    char cfg_dir[256];
+    cfg_dir[0] = 0;
+    if (argc > 0 && argv[0]) {
+        int i = 0;
+        const char *p = argv[0];
+        const char *last_slash = NULL;
+        while (*p) {
+            if (*p == '\\' || *p == '/') last_slash = p;
+            p++;
+        }
+        if (last_slash) {
+            int n = (int)(last_slash - argv[0]);
+            if (n > 255) n = 255;
+            for (i = 0; i < n; i++) cfg_dir[i] = argv[0][i];
+            cfg_dir[i] = 0;
+        }
+    }
+
+    /* Try to load config file 'sendmail.cfg' from same directory as executable */
+    char cfg_path[512];
+    int cfg_loaded = 0;
+    if (cfg_dir[0]) {
+        /* Build full path: cfg_dir\\sendmail.cfg */
+        int wi = 0;
+        const char *dp = cfg_dir;
+        while (*dp && wi < 500) cfg_path[wi++] = *dp++;
+        cfg_path[wi++] = '\\';
+        const char *cfgn = "sendmail.cfg";
+        while (*cfgn && wi < 508) cfg_path[wi++] = *cfgn++;
+        cfg_path[wi] = 0;
+    } else {
+        strncpy(cfg_path, "sendmail.cfg", sizeof(cfg_path)-1);
+    }
+
+    SendmailConfig cfg_buf;
+    cfg_loaded = load_config(cfg_path, &cfg_buf);
+
+    /* ---- Parse Arguments (override config if present) ---- */
     if (argc > 1 && argv[1][0] == '?' && argv[1][1] == 0) {
         usage();
         return 0;
     }
-    if (argc > 1 && argv[1][0] != '.') server = argv[1];
-    if (argc > 2 && argv[2][0] != '.') {
-        port = 0;
-        const char *p = argv[2];
-        while (*p) port = port * 10 + (*p++ - '0');
-    }
-    if (argc > 3 && argv[3][0] != '.') username = argv[3];
-    if (argc > 4 && argv[4][0] != '.') password = argv[4];
-    if (argc > 5 && argv[5][0] != '.') from = argv[5];
-    if (argc > 6 && argv[6][0] != '.') to_all = argv[6];
-    if (argc > 7 && argv[7][0] != '.') cc_all = argv[7];
-    if (argc > 8 && argv[8][0] != '.') subject = argv[8];
 
-    /* Parse attachments and body_file (-b flag + filenames) */
+    /* Use CLI args if available; otherwise fall back to config file, then defaults */
+    if (argc > 1) {
+        /* CLI args available — parse them */
+        if (argv[1][0] != '.') server = argv[1];
+        if (argc > 2 && argv[2][0] != '.') {
+            port = 0;
+            const char *p = argv[2];
+            while (*p) port = port * 10 + (*p++ - '0');
+        }
+        if (argc > 3 && argv[3][0] != '.') username = argv[3];
+        if (argc > 4 && argv[4][0] != '.') password = argv[4];
+        if (argc > 5 && argv[5][0] != '.') from = argv[5];
+        if (argc > 6 && argv[6][0] != '.') to_all = argv[6];
+        if (argc > 7 && argv[7][0] != '.') cc_all = argv[7];
+        if (argc > 8 && argv[8][0] != '.') subject = argv[8];
+    } else if (cfg_loaded) {
+        /* No CLI args — use config file */
+        server   = cfg_buf.server;
+        port     = cfg_buf.port;
+        username = cfg_buf.username;
+        password = cfg_buf.password;
+        from     = cfg_buf.from;
+        to_all   = cfg_buf.to;
+        if (cfg_buf.cc[0]) cc_all = cfg_buf.cc;
+        subject  = cfg_buf.subject;
+        if (cfg_buf.body_file[0]) body_file = cfg_buf.body_file;
+    }
+    /* else: use defaults */
+
+    /* Parse attachments and body_file */
     const char *att_paths[MAX_ATTACH];
     int num_att = 0;
-    for (int i = 9; i < argc; i++) {
-        if (argv[i][0] == '-' && argv[i][1] == 'b' && argv[i][2] == 0) {
-            if (i + 1 < argc) { body_file = argv[++i]; continue; }
+
+    if (argc > 1) {
+        /* CLI: parse from argv[9]+ */
+        for (int i = 9; i < argc; i++) {
+            if (argv[i][0] == '-' && argv[i][1] == 'b' && argv[i][2] == 0) {
+                if (i + 1 < argc) { body_file = argv[++i]; continue; }
+            }
+            if (num_att < MAX_ATTACH)
+                att_paths[num_att++] = argv[i];
         }
-        if (num_att < MAX_ATTACH)
-            att_paths[num_att++] = argv[i];
+    } else if (cfg_loaded) {
+        /* Config file: use attachment paths from config */
+        for (int i = 0; i < cfg_buf.num_att && i < MAX_ATTACH; i++) {
+            att_paths[num_att++] = cfg_buf.attachments[i];
+        }
+        /* body_file already set above */
     }
 
     /* ---- Read Body File ---- */
