@@ -278,11 +278,15 @@ static int smtp_cmd_plain(int fd, const char *cmd, int expected,
                            char *resp, int resp_max)
 {
     if (cmd) {
-        char buf[1024];
         int n = 0;
-        while (cmd[n] && n < 1018) { buf[n] = cmd[n]; n++; }
+        while (cmd[n]) n++;
+        char *buf = (char*)malloc((size_t)(n + 4));
+        if (!buf) return -1;
+        n = 0;
+        while (cmd[n]) { buf[n] = cmd[n]; n++; }
         buf[n++] = '\r'; buf[n++] = '\n';
         lwip_write(fd, buf, n);
+        free(buf);
         puts("C: "); puts(cmd); putc('\n');
     }
     int code;
@@ -303,11 +307,15 @@ static int smtp_cmd_tls(WOLFSSL *ssl, const char *cmd, int expected,
                          char *resp, int resp_max)
 {
     if (cmd) {
-        char buf[1024];
         int n = 0;
-        while (cmd[n] && n < 1018) { buf[n] = cmd[n]; n++; }
+        while (cmd[n]) n++;
+        char *buf = (char*)malloc((size_t)(n + 4));
+        if (!buf) return -1;
+        n = 0;
+        while (cmd[n]) { buf[n] = cmd[n]; n++; }
         buf[n++] = '\r'; buf[n++] = '\n';
         wolfSSL_write(ssl, buf, n);
+        free(buf);
         puts("C: "); puts(cmd); putc('\n');
     }
     int code;
@@ -512,15 +520,16 @@ static int is_absolute_path(const char *p) {
  */
 static char *read_file_at(const char *dir, const char *fname, int *outlen)
 {
-    char alt[512];
+    char *alt = (char*)malloc(512);
+    if (!alt) return NULL;
     int tried;
     
-    if (!fname) return NULL;
+    if (!fname) { free(alt); return NULL; }
 
     /* 1. Try the path as-is first */
     {
         char *d = read_file(fname, outlen);
-        if (d) return d;
+        if (d) { free(alt); return d; }
         puts("  [FILE] \""); puts(fname); puts("\" not found\n");
     }
 
@@ -535,7 +544,7 @@ static char *read_file_at(const char *dir, const char *fname, int *outlen)
             alt[di] = 0;
             puts("  [FILE] trying (no drive): \""); puts(alt); puts("\"\n");
             char *d = read_file(alt, outlen);
-            if (d) return d;
+            if (d) { free(alt); return d; }
         }
     }
 
@@ -552,7 +561,7 @@ static char *read_file_at(const char *dir, const char *fname, int *outlen)
         if (strcmp(alt, fname) != 0) {
             puts("  [FILE] trying (fwd slash): \""); puts(alt); puts("\"\n");
             char *d = read_file(alt, outlen);
-            if (d) return d;
+            if (d) { free(alt); return d; }
         }
     }
 
@@ -567,7 +576,7 @@ static char *read_file_at(const char *dir, const char *fname, int *outlen)
         alt[di] = 0;
         puts("  [FILE] trying (with dir): \""); puts(alt); puts("\"\n");
         char *d = read_file(alt, outlen);
-        if (d) return d;
+        if (d) { free(alt); return d; }
 
         /* 5. Also try forward-slash of dir+... */
         {
@@ -578,11 +587,12 @@ static char *read_file_at(const char *dir, const char *fname, int *outlen)
             }
             puts("  [FILE] trying (with dir, fwd slash): \""); puts(alt); puts("\"\n");
             d = read_file(alt, outlen);
-            if (d) return d;
+            if (d) { free(alt); return d; }
         }
     }
 
     puts("  [FILE] ALL attempts failed for \""); puts(fname); puts("\"\n");
+    free(alt);
     return NULL;
 }
 
@@ -706,15 +716,18 @@ int main(int argc, char *argv[])
         /* Try open with read_file_at path resolution */
         body_h = open_file(body_file);
         if (!body_h && cfg_dir[0]) {
-            char alt[512];
-            int di = 0;
-            const char *dp = cfg_dir;
-            while (*dp && di < 500) alt[di++] = *dp++;
-            if (di > 0 && alt[di-1] != '\\' && alt[di-1] != '/') alt[di++] = '\\';
-            dp = body_file;
-            while (*dp && di < 508) alt[di++] = *dp++;
-            alt[di] = 0;
-            body_h = open_file(alt);
+            char *alt = (char*)malloc(512);
+            if (alt) {
+                int di = 0;
+                const char *dp = cfg_dir;
+                while (*dp && di < 500) alt[di++] = *dp++;
+                if (di > 0 && alt[di-1] != '\\' && alt[di-1] != '/') alt[di++] = '\\';
+                dp = body_file;
+                while (*dp && di < 508) alt[di++] = *dp++;
+                alt[di] = 0;
+                body_h = open_file(alt);
+                free(alt);
+            }
         }
         if (body_h) {
             DWORD bsz = GetFileSize(body_h, NULL);
@@ -753,15 +766,18 @@ int main(int argc, char *argv[])
         if (!ah) {
             /* Try with cfg_dir prefix */
             if (cfg_dir[0]) {
-                char alt[512];
-                int di = 0;
-                const char *dp = cfg_dir;
-                while (*dp && di < 500) alt[di++] = *dp++;
-                if (di > 0 && alt[di-1] != '\\' && alt[di-1] != '/') alt[di++] = '\\';
-                dp = ap;
-                while (*dp && di < 508) alt[di++] = *dp++;
-                alt[di] = 0;
-                ah = CreateFile((char*)alt, FILE_ACCESS_READ, 0, NULL);
+                char *alt = (char*)malloc(512);
+                if (alt) {
+                    int di = 0;
+                    const char *dp = cfg_dir;
+                    while (*dp && di < 500) alt[di++] = *dp++;
+                    if (di > 0 && alt[di-1] != '\\' && alt[di-1] != '/') alt[di++] = '\\';
+                    dp = ap;
+                    while (*dp && di < 508) alt[di++] = *dp++;
+                    alt[di] = 0;
+                    ah = CreateFile((char*)alt, FILE_ACCESS_READ, 0, NULL);
+                    free(alt);
+                }
             }
         }
         if (!ah) {
@@ -839,24 +855,28 @@ int main(int argc, char *argv[])
 
     /* AUTH LOGIN - send base64 username and password */
     {
-        char b64buf[512];
+        char *b64buf = (char*)malloc(512);
+        if (!b64buf) goto free_ssl;
         int n;
         n = b64enc((const unsigned char*)username, (int)strlen(username), b64buf);
         b64buf[n] = 0;
-        if (smtp_cmd_tls(ssl, b64buf, 334, resp, MAX_RESP)) goto free_ssl;
+        if (smtp_cmd_tls(ssl, b64buf, 334, resp, MAX_RESP)) { free(b64buf); goto free_ssl; }
 
         n = b64enc((const unsigned char*)password, (int)strlen(password), b64buf);
         b64buf[n] = 0;
         if (smtp_cmd_tls(ssl, b64buf, 235, resp, MAX_RESP)) {
-            puts("  [AUTH FAIL]\n"); goto free_ssl;
+            puts("  [AUTH FAIL]\n"); free(b64buf); goto free_ssl;
         }
+        free(b64buf);
     }
 
     /* ---- MAIL FROM ---- */
     {
-        char cmd[300];
+        char *cmd = (char*)malloc(300);
+        if (!cmd) goto free_ssl;
         sprintf(cmd, "MAIL FROM:<%s>", from);
-        if (smtp_cmd_tls(ssl, cmd, 250, resp, MAX_RESP)) goto free_ssl;
+        if (smtp_cmd_tls(ssl, cmd, 250, resp, MAX_RESP)) { free(cmd); goto free_ssl; }
+        free(cmd);
     }
 
     /* ---- RCPT TO (support comma-separated recipients) ---- */
@@ -869,18 +889,19 @@ int main(int argc, char *argv[])
         copy[ci] = 0;
 
         char *tok = copy;
-        while (1) {
+        char *cmd = (char*)malloc(300);
+        while (cmd && 1) {
             char *comma = strchr(tok, ',');
             if (comma) *comma = 0;
             while (*tok == ' ') tok++;
             if (*tok) {
-                char cmd[300];
                 sprintf(cmd, "RCPT TO:<%s>", tok);
                 smtp_cmd_tls(ssl, cmd, 250, resp, MAX_RESP);
             }
             if (!comma) break;
             tok = comma + 1;
         }
+        free(cmd);
         free(copy);
     }
 
@@ -894,18 +915,20 @@ int main(int argc, char *argv[])
         copy[ci] = 0;
 
         char *tok = copy;
-        while (1) {
+        char *cmd = (char*)malloc(300);
+        while (cmd && 1) {
             char *comma = strchr(tok, ',');
             if (comma) *comma = 0;
             while (*tok == ' ') tok++;
             if (*tok) {
-                char cmd[300];
                 sprintf(cmd, "RCPT TO:<%s>", tok);
                 smtp_cmd_tls(ssl, cmd, 250, resp, MAX_RESP);
             }
             if (!comma) break;
             tok = comma + 1;
         }
+        free(cmd);
+        free(copy);
     }
 
     /* ---- DATA ---- */
@@ -931,7 +954,9 @@ int main(int argc, char *argv[])
 
     {
         int total_sent = 0;
-        char sbuf[CHUNK_SIZE];
+        /* sbuf allocated on heap — HelloX default stack is ~4KB, can't hold 16KB */
+        char *sbuf = (char*)malloc(CHUNK_SIZE);
+        if (!sbuf) { puts("  [MALLOC FAIL] sbuf\n"); goto free_ssl; }
 
         /* Email Headers */
         STREAM("From: "); STREAM(from); STREAM("\r\n");
@@ -960,15 +985,19 @@ int main(int argc, char *argv[])
 
         /* Body with dot-stuffing — streamed in chunks from file handle */
         if (body_h) {
-            unsigned char inchunk[CHUNK_SIZE / 2];
+            /* Heap-allocate read chunk (8KB too large for HelloX stack) */
+            int chunk_read_size = CHUNK_SIZE / 2;
+            unsigned char *inchunk = (unsigned char*)malloc(chunk_read_size);
+            if (!inchunk) { puts("  [MALLOC FAIL] inchunk\n"); free(sbuf); goto free_ssl; }
             while (1) {
                 DWORD just_read = 0;
-                if (!ReadFile(body_h, sizeof(inchunk), inchunk, &just_read))
+                if (!ReadFile(body_h, chunk_read_size, inchunk, &just_read))
                     break;
                 if (just_read == 0) break;
                 int slen = dot_stuff((const char*)inchunk, (int)just_read, sbuf, CHUNK_SIZE - 2);
                 if (slen > 0) STREAMN(sbuf, slen);
             }
+            free(inchunk);
         } else {
             STREAM("This is a TLS-encrypted email from HelloX OS.\r\n");
         }
@@ -1040,6 +1069,7 @@ int main(int argc, char *argv[])
         STREAM(""); /* flush */
 
         puts("Payload: "); putint(total_sent); puts(" bytes (encrypted, streamed)\n");
+        free(sbuf);
     }
 
 #undef STREAM
