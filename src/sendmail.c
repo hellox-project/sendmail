@@ -113,10 +113,70 @@ static int dot_stuff(const char *in, int inlen, char *out, int outmax)
  * File I/O via HelloX API — opens file for streamed reading
  * Returns a HANDLE that must be closed with CloseFile().
  * =================================================================== */
-static HANDLE open_file(const char *path)
+/* Helper: try opening a file, with case-folding fallback for FTP uploads.
+ * Returns: HANDLE (caller must CloseFile), or NULL.
+ * Prints diagnostic info on failure.
+ */
+static HANDLE try_open(const char *path, const char *context)
 {
     if (!path) return NULL;
-    return CreateFile((char*)path, FILE_ACCESS_READ, 0, NULL);
+    HANDLE h = CreateFile((char*)path, FILE_ACCESS_READ, 0, NULL);
+    if (h) return h;
+    /* Log failure for debugging */
+    puts("  ["); puts(context); puts("] cannot open: \""); puts(path); puts("\"\n");
+    /* Try uppercase filename (FTP often uppercases) */
+    if (path[0]) {
+        char *up = (char*)malloc(512);
+        if (up) {
+            int i = 0;
+            while (path[i] && i < 508) { up[i] = path[i]; i++; }
+            up[i] = 0; i--;
+            /* Only uppercase the filename part after last \ or / */
+            while (i >= 0 && up[i] != '\\' && up[i] != '/') {
+                if (up[i] >= 'a' && up[i] <= 'z') up[i] = up[i] - 32;
+                i--;
+            }
+            if (strcmp(path, up) != 0) {
+                h = CreateFile((char*)up, FILE_ACCESS_READ, 0, NULL);
+                if (h) { free(up); return h; }
+                puts("  ["); puts(context); puts("] also tried uppercase: \""); puts(up); puts("\"\n");
+            }
+            /* Also try first-char-uppercase (mixed case) */
+            i = 0;
+            while (path[i]) { up[i] = path[i]; i++; }
+            up[i] = 0;
+            i = 0;
+            while (up[i]) {
+                if (up[i] == '\\' || up[i] == '/') { i++; continue; }
+                up[i] = (up[i] >= 'a' && up[i] <= 'z') ? up[i] - 32 : up[i];
+                break;
+            }
+            if (strcmp(path, up) != 0) {
+                h = CreateFile((char*)up, FILE_ACCESS_READ, 0, NULL);
+                if (h) { free(up); return h; }
+            }
+            free(up);
+        }
+    }
+    return NULL;
+}
+
+/* Build a path from dir + file with backslash separator.
+ * Returns malloc'd string, caller must free.
+ */
+static char *build_path(const char *dir, const char *file)
+{
+    if (!dir || !dir[0]) return NULL;
+    char *path = (char*)malloc(512);
+    if (!path) return NULL;
+    int di = 0;
+    const char *dp = dir;
+    while (*dp && di < 500) path[di++] = *dp++;
+    if (di > 0 && path[di-1] != '\\' && path[di-1] != '/') path[di++] = '\\';
+    dp = file;
+    while (*dp && di < 508) path[di++] = *dp++;
+    path[di] = 0;
+    return path;
 }
 
 /* Read a small file into heap — only for files < 64KB (config files, small bodies) */
@@ -599,7 +659,15 @@ static char *read_file_at(const char *dir, const char *fname, int *outlen)
 /* ===================================================================
  * Main entry point
  * =================================================================== */
+/* Real logic in a separate function so main() has a tiny stack frame */
+static int real_main(int argc, char *argv[]);
+
 int main(int argc, char *argv[])
+{
+    return real_main(argc, argv);
+}
+
+static int real_main(int argc, char *argv[])
 {
     int wolfSSL_inited = 0;
     char *resp = NULL;
@@ -713,19 +781,12 @@ int main(int argc, char *argv[])
     HANDLE body_h = NULL;
     int    body_sz = 0;
     if (body_file) {
-        /* Try open with read_file_at path resolution */
-        body_h = open_file(body_file);
+        /* Try as-is, then with cfg_dir prefix, with case fallback */
+        body_h = try_open(body_file, "BODY");
         if (!body_h && cfg_dir[0]) {
-            char *alt = (char*)malloc(512);
+            char *alt = build_path(cfg_dir, body_file);
             if (alt) {
-                int di = 0;
-                const char *dp = cfg_dir;
-                while (*dp && di < 500) alt[di++] = *dp++;
-                if (di > 0 && alt[di-1] != '\\' && alt[di-1] != '/') alt[di++] = '\\';
-                dp = body_file;
-                while (*dp && di < 508) alt[di++] = *dp++;
-                alt[di] = 0;
-                body_h = open_file(alt);
+                body_h = try_open(alt, "BODY");
                 free(alt);
             }
         }
@@ -744,7 +805,7 @@ int main(int argc, char *argv[])
             }
         }
         if (!body_h) {
-            puts("  BODY SKIP (not found)\n");
+            puts("  [BODY] ALL attempts failed. Using default text.\n");
         }
     }
 
@@ -758,30 +819,17 @@ int main(int argc, char *argv[])
     int att_cnt = 0;
 
     for (int i = 0; i < num_att; i++) {
-        /* Try to open the attachment file via read_file_at path resolution */
-        /* We use a separate open_file_at that returns a HANDLE */
         const char *ap = att_paths[i];
-        /* Try as-is first */
-        HANDLE ah = CreateFile((char*)ap, FILE_ACCESS_READ, 0, NULL);
-        if (!ah) {
-            /* Try with cfg_dir prefix */
-            if (cfg_dir[0]) {
-                char *alt = (char*)malloc(512);
-                if (alt) {
-                    int di = 0;
-                    const char *dp = cfg_dir;
-                    while (*dp && di < 500) alt[di++] = *dp++;
-                    if (di > 0 && alt[di-1] != '\\' && alt[di-1] != '/') alt[di++] = '\\';
-                    dp = ap;
-                    while (*dp && di < 508) alt[di++] = *dp++;
-                    alt[di] = 0;
-                    ah = CreateFile((char*)alt, FILE_ACCESS_READ, 0, NULL);
-                    free(alt);
-                }
+        /* Try as-is first, then with cfg_dir prefix and case fallback */
+        HANDLE ah = try_open(ap, "ATT");
+        if (!ah && cfg_dir[0]) {
+            char *alt = build_path(cfg_dir, ap);
+            if (alt) {
+                ah = try_open(alt, "ATT");
+                free(alt);
             }
         }
         if (!ah) {
-            puts("  [ATT SKIP] cannot open: "); puts(ap); putc('\n');
             continue;
         }
 

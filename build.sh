@@ -65,8 +65,9 @@ ld -m i386pe --subsystem native:0 --entry _hx_main \
   --enable-reloc-section -T "$SRC_DIR/link.ld" \
   -o "$SRC_DIR/sendmail.exe" \
   --start-group \
+  main.o \
   "$SRC_DIR/src/sendmail.o" \
-  $(ls *.o | grep -v -e "$EXCLUDE" | tr '\n' ' ') \
+  $(ls *.o | grep -v -e "$EXCLUDE" | grep -v "sendmail\|main\b" | tr '\n' ' ') \
   $(find sockets/ -name "*.o" 2>/dev/null | tr '\n' ' ') \
   $(find ptmalloc/ -name "*.o" 2>/dev/null | tr '\n' ' ') \
   $(find wolfssl/ -name "*.o" 2>/dev/null | tr '\n' ' ') \
