@@ -114,50 +114,145 @@ static int dot_stuff(const char *in, int inlen, char *out, int outmax)
  * Returns a HANDLE that must be closed with CloseFile().
  * =================================================================== */
 /* Helper: try opening a file, with case-folding fallback for FTP uploads.
+ * Also tries forward-slash conversion and other common variants.
  * Returns: HANDLE (caller must CloseFile), or NULL.
  * Prints diagnostic info on failure.
  */
 static HANDLE try_open(const char *path, const char *context)
 {
     if (!path) return NULL;
+
+    /* 1. Try the path as-is first */
     HANDLE h = CreateFile((char*)path, FILE_ACCESS_READ, 0, NULL);
     if (h) return h;
-    /* Log failure for debugging */
-    puts("  ["); puts(context); puts("] cannot open: \""); puts(path); puts("\"\n");
-    /* Try uppercase filename (FTP often uppercases) */
-    if (path[0]) {
-        char *up = (char*)malloc(512);
-        if (up) {
-            int i = 0;
-            while (path[i] && i < 508) { up[i] = path[i]; i++; }
-            up[i] = 0; i--;
-            /* Only uppercase the filename part after last \ or / */
-            while (i >= 0 && up[i] != '\\' && up[i] != '/') {
-                if (up[i] >= 'a' && up[i] <= 'z') up[i] = up[i] - 32;
-                i--;
-            }
-            if (strcmp(path, up) != 0) {
-                h = CreateFile((char*)up, FILE_ACCESS_READ, 0, NULL);
-                if (h) { free(up); return h; }
-                puts("  ["); puts(context); puts("] also tried uppercase: \""); puts(up); puts("\"\n");
-            }
-            /* Also try first-char-uppercase (mixed case) */
-            i = 0;
-            while (path[i]) { up[i] = path[i]; i++; }
-            up[i] = 0;
-            i = 0;
-            while (up[i]) {
-                if (up[i] == '\\' || up[i] == '/') { i++; continue; }
-                up[i] = (up[i] >= 'a' && up[i] <= 'z') ? up[i] - 32 : up[i];
-                break;
-            }
-            if (strcmp(path, up) != 0) {
-                h = CreateFile((char*)up, FILE_ACCESS_READ, 0, NULL);
-                if (h) { free(up); return h; }
-            }
-            free(up);
+
+    /* If path is empty, nothing more to try */
+    if (!path[0]) return NULL;
+
+    /* Log first attempt failure for debugging */
+    puts("  ["); puts(context); puts("] trying: \""); puts(path); puts("\" → CreateFile fail\n");
+
+    /* Allocate scratch buffer for path mutations */
+    char *mut = (char*)malloc(512);
+    if (!mut) return NULL;
+
+    /* 2. Try forward-slash variant */
+    {
+        int i = 0;
+        while (path[i] && i < 508) {
+            mut[i] = (path[i] == '\\') ? '/' : path[i];
+            i++;
+        }
+        mut[i] = 0;
+        if (strcmp(mut, path) != 0) {
+            h = CreateFile((char*)mut, FILE_ACCESS_READ, 0, NULL);
+            if (h) { free(mut); return h; }
         }
     }
+
+    /* 3. Try uppercase filename only (FTP often uppercases just the filename part) */
+    {
+        int i = 0;
+        while (path[i] && i < 508) { mut[i] = path[i]; i++; }
+        mut[i] = 0;
+        /* Walk backwards to find start of filename */
+        int end = i - 1;
+        int fn_start = end;
+        while (fn_start >= 0 && mut[fn_start] != '\\' && mut[fn_start] != '/')
+            fn_start--;
+        fn_start++; /* point to first char of filename */
+        /* Uppercase the filename */
+        int changed = 0;
+        for (int j = fn_start; j <= end; j++) {
+            if (mut[j] >= 'a' && mut[j] <= 'z') { mut[j] = mut[j] - 32; changed = 1; }
+        }
+        if (changed) {
+            h = CreateFile((char*)mut, FILE_ACCESS_READ, 0, NULL);
+            if (h) { free(mut); return h; }
+            puts("  ["); puts(context); puts("] trying (uppercase): \""); puts(mut); puts("\" → CreateFile fail\n");
+        }
+    }
+
+    /* 4. Try uppercase filename + forward slashes */
+    {
+        int i = 0;
+        while (path[i] && i < 508) {
+            mut[i] = (path[i] == '\\') ? '/' : path[i];
+            i++;
+        }
+        mut[i] = 0;
+        int end = i - 1;
+        int fn_start = end;
+        while (fn_start >= 0 && mut[fn_start] != '/')
+            fn_start--;
+        fn_start++;
+        int changed = 0;
+        for (int j = fn_start; j <= end; j++) {
+            if (mut[j] >= 'a' && mut[j] <= 'z') { mut[j] = mut[j] - 32; changed = 1; }
+        }
+        if (changed) {
+            h = CreateFile((char*)mut, FILE_ACCESS_READ, 0, NULL);
+            if (h) { free(mut); return h; }
+        }
+    }
+
+    /* 5. Try drive-letter stripped (e.g. C:\FTP\FILE.TXT → \FTP\FILE.TXT) */
+    if ((path[0] >= 'a' && path[0] <= 'z') || (path[0] >= 'A' && path[0] <= 'Z')) {
+        if (path[1] == ':') {
+            int i = 0;
+            const char *src = path + 2;
+            while (*src && i < 508) mut[i++] = *src++;
+            mut[i] = 0;
+            h = CreateFile((char*)mut, FILE_ACCESS_READ, 0, NULL);
+            if (h) { free(mut); return h; }
+            /* Also try uppercase no-drive variant */
+            i = 0; src = path + 2;
+            while (*src && i < 508) {
+                mut[i] = (*src >= 'a' && *src <= 'z') ? *src - 32 : *src;
+                i++; src++;
+            }
+            mut[i] = 0;
+            h = CreateFile((char*)mut, FILE_ACCESS_READ, 0, NULL);
+            if (h) { free(mut); return h; }
+        }
+    }
+
+    /* 6. Try lowercase filename (just in case) */
+    {
+        int i = 0;
+        while (path[i] && i < 508) { mut[i] = path[i]; i++; }
+        mut[i] = 0;
+        int end = i - 1;
+        int fn_start = end;
+        while (fn_start >= 0 && mut[fn_start] != '\\' && mut[fn_start] != '/')
+            fn_start--;
+        fn_start++;
+        int changed = 0;
+        for (int j = fn_start; j <= end; j++) {
+            if (mut[j] >= 'A' && mut[j] <= 'Z') { mut[j] = mut[j] + 32; changed = 1; }
+        }
+        if (changed) {
+            h = CreateFile((char*)mut, FILE_ACCESS_READ, 0, NULL);
+            if (h) { free(mut); return h; }
+        }
+    }
+
+    /* 7. Try backslash → forward slashes + filename prefix only */
+    {
+        /* For config body path like "body.txt", also try just the filename
+         * without any path resolution (works if file is in same dir as exe) */
+        /* Check if path has no directory separators at all */
+        int has_sep = 0;
+        int i = 0;
+        while (path[i]) { if (path[i] == '\\' || path[i] == '/') { has_sep = 1; break; } i++; }
+        if (!has_sep) {
+            /* Path is just a filename — try it directly (already attempted above) */
+            /* Nothing more to try for bare filenames */
+        }
+    }
+
+    free(mut);
+    puts("  ["); puts(context); puts("] ALL attempts failed for \""); puts(path); puts("\"\n");
     return NULL;
 }
 
@@ -758,7 +853,7 @@ static int real_main(int argc, char *argv[])
 
     /* Parse attachments and body_file */
     const char *att_paths[MAX_ATTACH];
-    int num_att = 0;
+    int num_att = 0; /* explicitly zero — attachments only come from config's attach= lines */
 
     if (argc > 1) {
         /* CLI: parse from argv[9]+ */
@@ -781,15 +876,40 @@ static int real_main(int argc, char *argv[])
     HANDLE body_h = NULL;
     int    body_sz = 0;
     if (body_file) {
-        /* Try as-is, then with cfg_dir prefix, with case fallback */
+        /* Try body file with multiple path strategies */
+        puts("  [BODY] opening: \""); puts(body_file); puts("\"\n");
+
+        /* Strategy 1: Try the path as written in config */
         body_h = try_open(body_file, "BODY");
+
+        /* Strategy 2: Try with cfg_dir prefix */
         if (!body_h && cfg_dir[0]) {
             char *alt = build_path(cfg_dir, body_file);
             if (alt) {
+                puts("  [BODY] trying with dir prefix: \""); puts(cfg_dir);
+                puts("\\"); puts(body_file); puts("\"\n");
                 body_h = try_open(alt, "BODY");
                 free(alt);
             }
         }
+
+        /* Strategy 3: Try with cfg_dir + forward slash */
+        if (!body_h && cfg_dir[0]) {
+            char *alt = (char*)malloc(512);
+            if (alt) {
+                int di = 0;
+                const char *dp = cfg_dir;
+                while (*dp && di < 500) { alt[di++] = (*dp == '\\') ? '/' : *dp; dp++; }
+                if (di > 0 && alt[di-1] != '/') alt[di++] = '/';
+                dp = body_file;
+                while (*dp && di < 508) alt[di++] = *dp++;
+                alt[di] = 0;
+                puts("  [BODY] trying (fwd slash): \""); puts(alt); puts("\"\n");
+                body_h = try_open(alt, "BODY");
+                free(alt);
+            }
+        }
+
         if (body_h) {
             DWORD bsz = GetFileSize(body_h, NULL);
             if (bsz <= 0 || bsz > MAX_BODY_SIZE) {
@@ -820,16 +940,20 @@ static int real_main(int argc, char *argv[])
 
     for (int i = 0; i < num_att; i++) {
         const char *ap = att_paths[i];
+        puts("  [ATT] opening: \""); puts(ap); puts("\"\n");
         /* Try as-is first, then with cfg_dir prefix and case fallback */
         HANDLE ah = try_open(ap, "ATT");
         if (!ah && cfg_dir[0]) {
             char *alt = build_path(cfg_dir, ap);
             if (alt) {
+                puts("  [ATT] trying with dir prefix: \""); puts(cfg_dir);
+                puts("\\"); puts(ap); puts("\"\n");
                 ah = try_open(alt, "ATT");
                 free(alt);
             }
         }
         if (!ah) {
+            puts("  [ATT] SKIP — could not open\n");
             continue;
         }
 
