@@ -145,9 +145,11 @@ static char *read_file(const char *path, int *outlen)
 
     char *buf = (char*)malloc((size_t)(sz + 4));
     if (!buf) {
-        puts("  [FILE] malloc("); putint((int)(sz + 4)); puts(") FAIL\n");
+        puts("  [FILE] malloc("); putint((int)(sz + 4)); puts(") returned NULL\n");
         CloseFile(h); return NULL;
     }
+    /* Verify malloc returned writable memory (write a byte) */
+    buf[0] = 0; buf[(int)sz] = 0;
 
     DWORD read = 0;
     if (!ReadFile(h, sz, buf, &read)) {
@@ -442,7 +444,7 @@ static int load_config(const char *path, SendmailConfig *cfg)
     if (sz <= 0 || sz > 16384) { CloseFile(h); return 0; }
 
     char *buf = (char*)malloc((size_t)(sz + 4));
-    if (!buf) { CloseFile(h); return 0; }
+    if (!buf) { CloseFile(h); puts("  [CONFIG] malloc fail\n"); return 0; }
 
     DWORD read = 0;
     ReadFile(h, sz, buf, &read);
