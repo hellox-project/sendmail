@@ -35,6 +35,7 @@ extern int HxIOSend(WOLFSSL* ssl, char* buf, int sz, void* ctx);
 #define MAX_ATT_SIZE  (512 * 1024L)
 #define MAX_BODY_SIZE (512 * 1024L)
 #define BOUNDARY_STR  "----=_HelloX_Sendmail_0001"
+#define CHUNK_SIZE    16384    /* 16KB chunks for streaming sends */
 
 #ifndef NULL
 #define NULL ((void*)0)
@@ -109,8 +110,16 @@ static int dot_stuff(const char *in, int inlen, char *out, int outmax)
 }
 
 /* ===================================================================
- * File I/O via HelloX API
+ * File I/O via HelloX API — opens file for streamed reading
+ * Returns a HANDLE that must be closed with CloseFile().
  * =================================================================== */
+static HANDLE open_file(const char *path)
+{
+    if (!path) return NULL;
+    return CreateFile((char*)path, FILE_ACCESS_READ, 0, NULL);
+}
+
+/* Read a small file into heap — only for files < 64KB (config files, small bodies) */
 static char *read_file(const char *path, int *outlen)
 {
     if (!path) { puts("  [FILE] null path\n");  return NULL; }
@@ -126,11 +135,25 @@ static char *read_file(const char *path, int *outlen)
         return NULL;
     }
 
+    /* Only use read_file() for small files; large files use streaming path */
+    if (sz > 65536) {
+        puts("  [FILE] large file ("); putint((int)sz);
+        puts(" bytes), use streaming API instead\n");
+        CloseFile(h);
+        return NULL;
+    }
+
     char *buf = (char*)malloc((size_t)(sz + 4));
-    if (!buf) { CloseFile(h); return NULL; }
+    if (!buf) {
+        puts("  [FILE] malloc("); putint((int)(sz + 4)); puts(") FAIL\n");
+        CloseFile(h); return NULL;
+    }
 
     DWORD read = 0;
-    ReadFile(h, sz, buf, &read);
+    if (!ReadFile(h, sz, buf, &read)) {
+        puts("  [FILE] ReadFile FAIL\n");
+        free(buf); CloseFile(h); return NULL;
+    }
     CloseFile(h);
     buf[(int)read] = 0;
     if (outlen) *outlen = (int)read;
@@ -567,6 +590,7 @@ static char *read_file_at(const char *dir, const char *fname, int *outlen)
 int main(int argc, char *argv[])
 {
     int wolfSSL_inited = 0;
+    char *resp = NULL;
 
     /* ---- Default Parameters ---- */
     const char *server   = "111.124.203.45"; /* smtp.163.com */
@@ -673,44 +697,100 @@ int main(int argc, char *argv[])
         /* body_file already set above */
     }
 
-    /* ---- Read Body File (with config-dir fallback) ---- */
-    char *body_data = NULL;
-    int   body_len  = 0;
+    /* ---- Open Body File (streamed — no large heap alloc) ---- */
+    HANDLE body_h = NULL;
+    int    body_sz = 0;
     if (body_file) {
-        body_data = read_file_at(cfg_dir, body_file, &body_len);
-        if (body_data) {
-            puts("  BODY READ: "); putint(body_len); puts(" bytes\n");
-        } else {
+        /* Try open with read_file_at path resolution */
+        body_h = open_file(body_file);
+        if (!body_h && cfg_dir[0]) {
+            char alt[512];
+            int di = 0;
+            const char *dp = cfg_dir;
+            while (*dp && di < 500) alt[di++] = *dp++;
+            if (di > 0 && alt[di-1] != '\\' && alt[di-1] != '/') alt[di++] = '\\';
+            dp = body_file;
+            while (*dp && di < 508) alt[di++] = *dp++;
+            alt[di] = 0;
+            body_h = open_file(alt);
+        }
+        if (body_h) {
+            DWORD bsz = GetFileSize(body_h, NULL);
+            if (bsz <= 0 || bsz > MAX_BODY_SIZE) {
+                if (bsz > MAX_BODY_SIZE) {
+                    puts("  [BODY SKIP] too large: "); putint((int)bsz);
+                    puts(" > "); putint((int)MAX_BODY_SIZE); putc('\n');
+                }
+                CloseFile(body_h);
+                body_h = NULL;
+            } else {
+                body_sz = (int)bsz;
+                puts("  BODY OPENED: "); putint(body_sz); puts(" bytes (streamed)\n");
+            }
+        }
+        if (!body_h) {
             puts("  BODY SKIP (not found)\n");
         }
     }
 
-    /* ---- Read Attachments ---- */
+    /* ---- Read Attachments — streamed data struct (holds file handles) ---- */
     struct {
-        unsigned char *data;
-        int len;
+        HANDLE h;
+        int sz;
         const char *fname;
         const char *mime;
     } atts[MAX_ATTACH];
     int att_cnt = 0;
 
     for (int i = 0; i < num_att; i++) {
-        atts[att_cnt].data = (unsigned char*)read_file_at(cfg_dir, att_paths[i], &atts[att_cnt].len);
-        if (!atts[att_cnt].data) continue;
+        /* Try to open the attachment file via read_file_at path resolution */
+        /* We use a separate open_file_at that returns a HANDLE */
+        const char *ap = att_paths[i];
+        /* Try as-is first */
+        HANDLE ah = CreateFile((char*)ap, FILE_ACCESS_READ, 0, NULL);
+        if (!ah) {
+            /* Try with cfg_dir prefix */
+            if (cfg_dir[0]) {
+                char alt[512];
+                int di = 0;
+                const char *dp = cfg_dir;
+                while (*dp && di < 500) alt[di++] = *dp++;
+                if (di > 0 && alt[di-1] != '\\' && alt[di-1] != '/') alt[di++] = '\\';
+                dp = ap;
+                while (*dp && di < 508) alt[di++] = *dp++;
+                alt[di] = 0;
+                ah = CreateFile((char*)alt, FILE_ACCESS_READ, 0, NULL);
+            }
+        }
+        if (!ah) {
+            puts("  [ATT SKIP] cannot open: "); puts(ap); putc('\n');
+            continue;
+        }
+
+        DWORD asz = GetFileSize(ah, NULL);
+        if (asz <= 0 || asz > MAX_ATT_SIZE) {
+            if (asz > MAX_ATT_SIZE) {
+                puts("  [ATT SKIP] too large: "); putint((int)asz);
+                puts(" > "); putint((int)MAX_ATT_SIZE); putc('\n');
+            }
+            CloseFile(ah); continue;
+        }
 
         /* Extract filename from path */
-        const char *fn = att_paths[i];
-        const char *p = fn;
+        const char *fn = ap;
+        const char *p = ap;
         while (*p) {
             if (*p == '\\' || *p == '/') fn = p + 1;
             p++;
         }
+
+        atts[att_cnt].h = ah;
+        atts[att_cnt].sz = (int)asz;
         atts[att_cnt].fname = fn;
         atts[att_cnt].mime  = mime_type(fn);
         att_cnt++;
     }
 
-    char *resp = NULL;
     puts("Attachments: "); putint(att_cnt); putc('\n');
 
     /* ---- TCP Connect ---- */
@@ -718,7 +798,7 @@ int main(int argc, char *argv[])
     if (!resp) { puts("  [MALLOC FAIL]\n"); goto cleanup; }
     puts("[CONNECT] "); puts(server); putc(':'); putint(port); puts("...\n");
     int fd = tcp_connect(server, port);
-    if (fd < 0) { puts("  [FAIL] err="); putint(fd); putc('\n'); goto cleanup; }
+    if (fd < 0) { puts("  [FAIL] err="); putint(fd); putc('\n'); fd = -1; goto cleanup; }
     puts("  [OK] fd="); putint(fd); putc('\n');
 
     /* ---- Phase 1: Plain SMTP ---- */
@@ -830,115 +910,138 @@ int main(int argc, char *argv[])
     if (smtp_cmd_tls(ssl, "DATA", 354, resp, MAX_RESP)) goto free_ssl;
 
     /* =============================================================
-     * Build MIME payload
+     * Send MIME payload — streamed (no large heap alloc for payload)
      * ============================================================= */
     const char *boundary = BOUNDARY_STR;
     int has_att = (att_cnt > 0);
 
-    /* Estimate payload size */
-    int est = 8192; /* headers + safety */
-    if (body_data) est += body_len * 2 + 256;
-    for (int i = 0; i < att_cnt; i++)
-        est += 512 + (atts[i].len / 3 + 1) * 4 + 64;
-    est = est * 2 + 8192;
-    if (est > MAX_BODY_SIZE * 2) est = MAX_BODY_SIZE * 2;
-
-    char *payload = (char*)malloc((size_t)est);
-    if (!payload) { puts("[MALLOC FAIL]\n"); goto free_ssl; }
-    int poff = 0;
-
-/* Helper macros */
-#define PUSH(s) do { \
-    const char *_p = (s); \
-    while (*_p && poff < est - 1) payload[poff++] = *_p++; \
+#define STREAM(s) do { \
+    const char *_sp = (s); \
+    int _slen = 0; while (_sp[_slen]) _slen++; \
+    if (send_payload_tls(ssl, _sp, _slen)) goto free_ssl; \
+    total_sent += _slen; \
 } while(0)
 
-#define PUSHN(d, n) do { \
-    int _i; \
-    for (_i = 0; _i < (n) && poff < est - 1; _i++) payload[poff++] = (d)[_i]; \
+#define STREAMN(d, n) do { \
+    if ((n) > 0 && send_payload_tls(ssl, (d), (n))) goto free_ssl; \
+    total_sent += (n); \
 } while(0)
 
-    /* Email Headers */
-    PUSH("From: "); PUSH(from); PUSH("\r\n");
-    PUSH("To: "); PUSH(to_all); PUSH("\r\n");
-    if (cc_all) { PUSH("Cc: "); PUSH(cc_all); PUSH("\r\n"); }
-    PUSH("Subject: "); PUSH(subject); PUSH("\r\n");
-    PUSH("Date: Mon, 25 May 2026 10:00:00 +0800\r\n");
-    PUSH("MIME-Version: 1.0\r\n");
-    PUSH("X-Mailer: HelloX OS Sendmail\r\n");
+    {
+        int total_sent = 0;
+        char sbuf[CHUNK_SIZE];
 
-    /* Content-Type header */
-    if (has_att) {
-        PUSH("Content-Type: multipart/mixed; boundary=\"");
-        PUSH(boundary); PUSH("\"\r\n");
-        PUSH("\r\n");
-        /* Start first MIME part for body */
-        PUSH("--"); PUSH(boundary); PUSH("\r\n");
-        PUSH("Content-Type: text/plain; charset=\"utf-8\"\r\n");
-        PUSH("Content-Transfer-Encoding: 7bit\r\n");
-        PUSH("\r\n");
-    } else {
-        PUSH("Content-Type: text/plain; charset=\"utf-8\"\r\n");
-    }
+        /* Email Headers */
+        STREAM("From: "); STREAM(from); STREAM("\r\n");
+        STREAM("To: "); STREAM(to_all); STREAM("\r\n");
+        if (cc_all) { STREAM("Cc: "); STREAM(cc_all); STREAM("\r\n"); }
+        STREAM("Subject: "); STREAM(subject); STREAM("\r\n");
+        STREAM("Date: Mon, 25 May 2026 10:00:00 +0800\r\n");
+        STREAM("MIME-Version: 1.0\r\n");
+        STREAM("X-Mailer: HelloX OS Sendmail\r\n");
 
-    PUSH("\r\n");
-
-    /* Body with dot-stuffing */
-    if (body_data) {
-        int stuffed_max = body_len * 2 + 64;
-        char *stuffed = (char*)malloc((size_t)stuffed_max);
-        if (stuffed) {
-            int slen = dot_stuff(body_data, body_len, stuffed, stuffed_max);
-            PUSHN(stuffed, slen);
-            free(stuffed);
+        /* Content-Type header */
+        if (has_att) {
+            STREAM("Content-Type: multipart/mixed; boundary=\"");
+            STREAM(boundary); STREAM("\"\r\n");
+            STREAM("\r\n");
+            /* Start first MIME part for body */
+            STREAM("--"); STREAM(boundary); STREAM("\r\n");
+            STREAM("Content-Type: text/plain; charset=\"utf-8\"\r\n");
+            STREAM("Content-Transfer-Encoding: 7bit\r\n");
+            STREAM("\r\n");
         } else {
-            PUSHN(body_data, body_len);
+            STREAM("Content-Type: text/plain; charset=\"utf-8\"\r\n");
         }
-    } else {
-        PUSH("This is a TLS-encrypted email from HelloX OS.\r\n");
-    }
 
-    /* Ensure body ends with \r\n */
-    if (poff < 2 || payload[poff-1] != '\n') {
-        PUSH("\r\n");
-    }
+        STREAM("\r\n");
 
-    /* Attachments */
-    for (int i = 0; i < att_cnt; i++) {
-        PUSH("--"); PUSH(boundary); PUSH("\r\n");
-        PUSH("Content-Type: "); PUSH(atts[i].mime); PUSH("\r\n");
-        PUSH("Content-Transfer-Encoding: base64\r\n");
-        PUSH("Content-Disposition: attachment; filename=\"");
-        PUSH(atts[i].fname); PUSH("\"\r\n");
-        PUSH("\r\n");
-
-        int b64sz = (atts[i].len / 3 + 1) * 4 + 100;
-        char *b64 = (char*)malloc((size_t)b64sz);
-        if (b64) {
-            int n = b64enc(atts[i].data, atts[i].len, b64);
-            PUSHN(b64, n);
-            PUSH("\r\n");
-            free(b64);
+        /* Body with dot-stuffing — streamed in chunks from file handle */
+        if (body_h) {
+            unsigned char inchunk[CHUNK_SIZE / 2];
+            while (1) {
+                DWORD just_read = 0;
+                if (!ReadFile(body_h, sizeof(inchunk), inchunk, &just_read))
+                    break;
+                if (just_read == 0) break;
+                int slen = dot_stuff((const char*)inchunk, (int)just_read, sbuf, CHUNK_SIZE - 2);
+                if (slen > 0) STREAMN(sbuf, slen);
+            }
+        } else {
+            STREAM("This is a TLS-encrypted email from HelloX OS.\r\n");
         }
+
+        /* Ensure body ends with \r\n */
+        STREAM("\r\n");
+
+        /* Attachments — streamed: read-chunk → base64-encode-chunk → send-loop */
+        for (int i = 0; i < att_cnt; i++) {
+            STREAM("--"); STREAM(boundary); STREAM("\r\n");
+            STREAM("Content-Type: "); STREAM(atts[i].mime); STREAM("\r\n");
+            STREAM("Content-Transfer-Encoding: base64\r\n");
+            STREAM("Content-Disposition: attachment; filename=\"");
+            STREAM(atts[i].fname); STREAM("\"\r\n");
+            STREAM("\r\n");
+
+            /* Read attachment in chunks, encode each chunk to base64, send */
+            unsigned char in_chunk[48];  /* 48 bytes -> 64 chars base64 per group */
+            int remaining = atts[i].sz;
+            int col = 0;  /* current column in base64 output line */
+            while (remaining > 0) {
+                int to_read = (remaining > 48) ? 48 : remaining;
+                DWORD just_read = 0;
+                if (!ReadFile(atts[i].h, to_read, in_chunk, &just_read)) {
+                    puts("  [ATT READ FAIL]\n");
+                    break;
+                }
+                if (just_read == 0) break;
+                remaining -= (int)just_read;
+
+                /* Encode this chunk to base64 */
+                int b64n = b64enc(in_chunk, (int)just_read, sbuf);
+                if (b64n <= 0) continue;
+
+                /* Break base64 into 76-char lines */
+                int bo = 0;
+                while (bo < b64n) {
+                    int line_room = 76 - col;
+                    int take = (b64n - bo > line_room) ? line_room : b64n - bo;
+                    if (send_payload_tls(ssl, sbuf + bo, take)) {
+                        puts("  [ATT SEND FAIL]\n");
+                        goto free_ssl;
+                    }
+                    total_sent += take;
+                    bo += take;
+                    col += take;
+                    if (col >= 76) {
+                        STREAM("\r\n");
+                        col = 0;
+                    }
+                }
+            }
+
+            /* Ensure attachment ends with newline */
+            if (col > 0) STREAM("\r\n");
+            col = 0;
+
+            CloseFile(atts[i].h);
+            atts[i].h = NULL;
+        }
+
+        /* Close MIME boundary */
+        if (has_att) {
+            STREAM("--"); STREAM(boundary); STREAM("--\r\n");
+        }
+
+        /* End SMTP DATA */
+        STREAM("\r\n.\r\n");
+        STREAM(""); /* flush */
+
+        puts("Payload: "); putint(total_sent); puts(" bytes (encrypted, streamed)\n");
     }
 
-    /* Close MIME boundary */
-    if (has_att) {
-        PUSH("--"); PUSH(boundary); PUSH("--\r\n");
-    }
-
-    /* End SMTP DATA */
-    PUSH("\r\n.\r\n");
-    payload[poff] = 0;
-
-    puts("Payload: "); putint(poff); puts(" bytes (encrypted)\n");
-
-    /* Send payload over TLS */
-    if (send_payload_tls(ssl, payload, poff)) {
-        free(payload);
-        goto free_ssl;
-    }
-    free(payload);
+#undef STREAM
+#undef STREAMN
 
     /* Check response */
     recvline_tls(ssl, resp, MAX_RESP);
@@ -962,8 +1065,9 @@ cleanup:
     if (wolfSSL_inited) wolfSSL_Cleanup();
     free(resp);
     free(cfg_buf);
-    free(body_data);
-    for (int i = 0; i < att_cnt; i++) free(atts[i].data);
+    if (body_h) CloseFile(body_h);
+    for (int i = 0; i < att_cnt; i++)
+        if (atts[i].h) CloseFile(atts[i].h);
     puts("[SENDMAIL] Done\n");
     return 0;
 }
