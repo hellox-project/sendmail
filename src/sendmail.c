@@ -630,16 +630,17 @@ static int load_config(const char *path, SendmailConfig *cfg)
 
         const char *val;
         if ((val = cfg_val(line))) {
-            if      (strncmp(line, "server", 6) == 0)  { strncpy(cfg->server, val, sizeof(cfg->server)-1); }
-            else if (strncmp(line, "port", 4) == 0)     { cfg->port = 0; while (*val >= '0' && *val <= '9') cfg->port = cfg->port * 10 + (*val++ - '0'); }
-            else if (strncmp(line, "username", 8) == 0) { strncpy(cfg->username, val, sizeof(cfg->username)-1); }
-            else if (strncmp(line, "password", 8) == 0) { strncpy(cfg->password, val, sizeof(cfg->password)-1); }
-            else if (strncmp(line, "from", 4) == 0)     { strncpy(cfg->from, val, sizeof(cfg->from)-1); }
-            else if (strncmp(line, "to", 2) == 0)       { strncpy(cfg->to, val, sizeof(cfg->to)-1); }
-            else if (strncmp(line, "cc", 2) == 0)       { strncpy(cfg->cc, val, sizeof(cfg->cc)-1); }
-            else if (strncmp(line, "subject", 7) == 0)  { strncpy(cfg->subject, val, sizeof(cfg->subject)-1); }
-            else if (strncmp(line, "body", 4) == 0)     { strncpy(cfg->body_file, val, sizeof(cfg->body_file)-1); }
-            else if (strncmp(line, "attach", 6) == 0) {
+            /* Use exact key comparison: match only if line starts with key= */
+            if      (strncmp(line, "server=", 7) == 0)  { strncpy(cfg->server, val, sizeof(cfg->server)-1); }
+            else if (strncmp(line, "port=", 5) == 0)     { cfg->port = 0; while (*val >= '0' && *val <= '9') cfg->port = cfg->port * 10 + (*val++ - '0'); }
+            else if (strncmp(line, "username=", 9) == 0) { strncpy(cfg->username, val, sizeof(cfg->username)-1); }
+            else if (strncmp(line, "password=", 9) == 0) { strncpy(cfg->password, val, sizeof(cfg->password)-1); }
+            else if (strncmp(line, "from=", 5) == 0)     { strncpy(cfg->from, val, sizeof(cfg->from)-1); }
+            else if (strncmp(line, "to=", 3) == 0)       { strncpy(cfg->to, val, sizeof(cfg->to)-1); }
+            else if (strncmp(line, "cc=", 3) == 0)       { strncpy(cfg->cc, val, sizeof(cfg->cc)-1); }
+            else if (strncmp(line, "subject=", 8) == 0)  { strncpy(cfg->subject, val, sizeof(cfg->subject)-1); }
+            else if (strncmp(line, "body=", 5) == 0)     { strncpy(cfg->body_file, val, sizeof(cfg->body_file)-1); }
+            else if (strncmp(line, "attach=", 7) == 0) {
                 if (cfg->num_att < 8) {
                     strncpy(cfg->attachments[cfg->num_att], val, sizeof(cfg->attachments[0])-1);
                     cfg->num_att++;
